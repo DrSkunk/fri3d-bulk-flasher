@@ -1,0 +1,92 @@
+name: Build standalone binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+          - os: windows-2022
+            target: windows-x64
+          - os: windows-11-arm
+            target: windows-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build binary
+        shell: bash
+        run: |
+          uv sync --group build
+          uv run pyinstaller \
+            --onefile \
+            --name fri3d-bulk-flasher \
+            --collect-submodules textual \
+            --collect-submodules esptool \
+            --collect-data esptool \
+            --copy-metadata esptool \
+            --collect-submodules serial \
+            --clean --noconfirm \
+            run.py
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN=dist/fri3d-bulk-flasher.exe
+          else
+            BIN=dist/fri3d-bulk-flasher
+          fi
+          "$BIN" --version
+          "$BIN" --esptool version
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a fri3d-bulk-flasher-${{ matrix.target }}.zip fri3d-bulk-flasher.exe
+          else
+            tar czf fri3d-bulk-flasher-${{ matrix.target }}.tar.gz fri3d-bulk-flasher
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fri3d-bulk-flasher-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

@@ -1,0 +1,24 @@
+[project]
+name = "fri3d-bulk-flasher"
+version = "0.1.0"
+description = "Bulk firmware flasher TUI for Fri3d Camp 2026 devices (Badge, Communicator, DJ Addon)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "textual>=1.0",
+    "esptool>=5.0",
+    "pyserial>=3.5",
+]
+
+[dependency-groups]
+build = ["pyinstaller>=6.10"]
+
+[project.scripts]
+fri3d-bulk-flasher = "bulk_flasher.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bulk_flasher"]
