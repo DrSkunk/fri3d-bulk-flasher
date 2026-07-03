@@ -25,9 +25,9 @@ jobs:
             target: windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.12"
 
@@ -67,7 +67,7 @@ jobs:
             tar czf fri3d-bulk-flasher-${{ matrix.target }}.tar.gz fri3d-bulk-flasher
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fri3d-bulk-flasher-${{ matrix.target }}
           path: |
@@ -81,10 +81,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
