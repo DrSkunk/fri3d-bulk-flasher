@@ -16,6 +16,14 @@ USER_AGENT = "fri3d-bulk-flasher"
 LogFn = Callable[[str], None]
 
 
+def format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
 @dataclass
 class FirmwareInfo:
     tag: str
@@ -85,8 +93,7 @@ def fetch_latest(device: Device, log: LogFn) -> FirmwareInfo:
     dest = device.firmware_dir / asset["name"]
     tmp = dest.with_suffix(dest.suffix + ".part")
 
-    size_mb = asset["size"] / (1024 * 1024)
-    log(f"Downloading {asset['name']} ({size_mb:.1f} MB) from release {tag}...")
+    log(f"Downloading {asset['name']} ({format_size(asset['size'])}) from release {tag}...")
 
     req = urllib.request.Request(
         asset["browser_download_url"], headers={"User-Agent": USER_AGENT}

@@ -101,8 +101,8 @@ class BulkFlasherApp(App):
         info = firmware.get_cached(self.selected_device)
         widget = self.query_one("#fw-info", Static)
         if info:
-            size_mb = info.size / (1024 * 1024)
-            widget.update(f"{info.tag}\n{info.asset_name} ({size_mb:.1f} MB)")
+            size = firmware.format_size(info.size)
+            widget.update(f"{info.tag}\n{info.asset_name} ({size})")
         else:
             widget.update("Not downloaded yet.\nPress [f] to fetch.")
 
