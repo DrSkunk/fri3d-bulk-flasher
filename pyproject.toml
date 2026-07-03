@@ -8,6 +8,13 @@ dependencies = [
     "textual>=1.0",
     "esptool>=5.0",
     "pyserial>=3.5",
+    # cryptography 46.0.3 is the last release with a win_arm64 wheel; newer
+    # releases build from sdist, which needs Rust + OpenSSL that the
+    # windows-11-arm CI runner doesn't have.
+    "cryptography<=46.0.3 ; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    # <49 matches esptool 5.3.1's own cap on macOS x86_64, keeping esptool
+    # from forking across platforms.
+    "cryptography>=47,<49 ; sys_platform != 'win32' or platform_machine != 'ARM64'",
 ]
 
 [dependency-groups]
