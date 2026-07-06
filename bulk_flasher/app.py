@@ -61,6 +61,7 @@ class BulkFlasherApp(App):
         super().__init__()
         self.selected_device: Device = DEVICES[0]
         self.cancel_event: threading.Event | None = None
+        self.fetch_cancel: threading.Event | None = None
         self.stats = Stats()
         self.busy = False  # a fetch or flash worker is running
 
@@ -94,8 +95,15 @@ class BulkFlasherApp(App):
     def log_line(self, line: str) -> None:
         self.query_one("#log", RichLog).write(line)
 
+    def _call_ui(self, fn, *args) -> None:
+        """call_from_thread that tolerates the app already shutting down."""
+        try:
+            self.call_from_thread(fn, *args)
+        except RuntimeError:
+            pass
+
     def _log_from_thread(self, line: str) -> None:
-        self.call_from_thread(self.log_line, line)
+        self._call_ui(self.log_line, line)
 
     def _refresh_fw_info(self) -> None:
         info = firmware.get_cached(self.selected_device)
@@ -146,6 +154,7 @@ class BulkFlasherApp(App):
         self.busy = True
         self.query_one("#fetch", Button).disabled = True
         self.query_one("#start", Button).disabled = True
+        self.fetch_cancel = threading.Event()
         device = self.selected_device
         self.run_worker(
             lambda: self._fetch_worker(device), thread=True, exclusive=False
@@ -153,14 +162,17 @@ class BulkFlasherApp(App):
 
     def _fetch_worker(self, device: Device) -> None:
         try:
-            firmware.fetch_latest(device, self._log_from_thread)
+            firmware.fetch_latest(device, self._log_from_thread, self.fetch_cancel)
+        except firmware.FetchCancelled:
+            self._log_from_thread("Fetch cancelled.")
         except Exception as exc:  # noqa: BLE001 — surface any failure in the log
             self._log_from_thread(f"ERROR fetching firmware: {exc}")
         finally:
-            self.call_from_thread(self._fetch_done)
+            self._call_ui(self._fetch_done)
 
     def _fetch_done(self) -> None:
         self.busy = False
+        self.fetch_cancel = None
         self.query_one("#fetch", Button).disabled = False
         self.query_one("#start", Button).disabled = False
         self._refresh_fw_info()
@@ -181,6 +193,7 @@ class BulkFlasherApp(App):
             self.busy = True
             self.query_one("#fetch", Button).disabled = True
             self.query_one("#start", Button).disabled = True
+            self.fetch_cancel = threading.Event()
             self.run_worker(
                 lambda: self._fetch_then_start(device), thread=True, exclusive=False
             )
@@ -189,13 +202,19 @@ class BulkFlasherApp(App):
 
     def _fetch_then_start(self, device: Device) -> None:
         try:
-            info = firmware.fetch_latest(device, self._log_from_thread)
+            info = firmware.fetch_latest(
+                device, self._log_from_thread, self.fetch_cancel
+            )
+        except firmware.FetchCancelled:
+            self._log_from_thread("Fetch cancelled.")
+            self._call_ui(self._fetch_done)
+            return
         except Exception as exc:  # noqa: BLE001
             self._log_from_thread(f"ERROR fetching firmware: {exc}")
-            self.call_from_thread(self._fetch_done)
+            self._call_ui(self._fetch_done)
             return
-        self.call_from_thread(self._fetch_done)
-        self.call_from_thread(self._launch_flash_loop, device, info)
+        self._call_ui(self._fetch_done)
+        self._call_ui(self._launch_flash_loop, device, info)
 
     def _launch_flash_loop(self, device: Device, info: firmware.FirmwareInfo) -> None:
         self.busy = True
@@ -225,12 +244,12 @@ class BulkFlasherApp(App):
                 cancel,
                 self._log_from_thread,
                 stats,
-                lambda: self.call_from_thread(self._refresh_stats),
+                lambda: self._call_ui(self._refresh_stats),
             )
         except Exception as exc:  # noqa: BLE001
             self._log_from_thread(f"ERROR: {exc}")
         finally:
-            self.call_from_thread(self._flash_done)
+            self._call_ui(self._flash_done)
 
     def _flash_done(self) -> None:
         self.busy = False
@@ -242,6 +261,16 @@ class BulkFlasherApp(App):
             self.log_line("Stopping after current operation...")
             self.cancel_event.set()
             self.query_one("#stop", Button).disabled = True
+
+    async def action_quit(self) -> None:
+        # Signal the flash worker thread before exiting: the executor thread
+        # is non-daemon, so leaving it running keeps the process alive after
+        # the UI has closed.
+        if self.cancel_event is not None:
+            self.cancel_event.set()
+        if self.fetch_cancel is not None:
+            self.fetch_cancel.set()
+        self.exit()
 
 
 def main() -> None:

@@ -43,6 +43,23 @@ def _esp_candidate_ports() -> set[str]:
     }
 
 
+def _terminate(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _kill_on_cancel(proc: subprocess.Popen, cancel: threading.Event) -> None:
+    """Terminate proc when cancel fires, so a blocked pipe read gets EOF."""
+    while proc.poll() is None:
+        if cancel.wait(timeout=0.5):
+            if proc.poll() is None:
+                _terminate(proc)
+            return
+
+
 def _run_streamed(
     cmd: list[str], log: LogFn, cancel: threading.Event, timeout: float | None = None
 ) -> int:
@@ -57,15 +74,15 @@ def _run_streamed(
         creationflags=creationflags,
     )
     assert proc.stdout is not None
+    watchdog = threading.Thread(
+        target=_kill_on_cancel, args=(proc, cancel), daemon=True
+    )
+    watchdog.start()
     buf = b""
     last_progress = 0.0
     while True:
         if cancel.is_set():
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _terminate(proc)
             return -1
         chunk = proc.stdout.read(1)
         if chunk == b"":

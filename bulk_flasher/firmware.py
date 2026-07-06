@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import shutil
+import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,10 @@ from .devices import Device
 
 USER_AGENT = "fri3d-bulk-flasher"
 LogFn = Callable[[str], None]
+
+
+class FetchCancelled(Exception):
+    """Raised when a firmware download is cancelled."""
 
 
 def format_size(size: int) -> str:
@@ -66,11 +71,22 @@ def _api_get(url: str) -> dict:
         return json.loads(resp.read().decode())
 
 
-def fetch_latest(device: Device, log: LogFn) -> FirmwareInfo:
-    """Download the latest matching release asset for the device."""
+def fetch_latest(
+    device: Device, log: LogFn, cancel: threading.Event | None = None
+) -> FirmwareInfo:
+    """Download the latest matching release asset for the device.
+
+    Raises FetchCancelled when `cancel` is set mid-download.
+    """
+
+    def check_cancel() -> None:
+        if cancel is not None and cancel.is_set():
+            raise FetchCancelled
+
     url = f"https://api.github.com/repos/{device.repo}/releases/latest"
     log(f"Querying {device.repo} for latest release...")
     release = _api_get(url)
+    check_cancel()
     tag = release.get("tag_name", "unknown")
 
     asset = None
@@ -100,16 +116,21 @@ def fetch_latest(device: Device, log: LogFn) -> FirmwareInfo:
     )
     downloaded = 0
     next_report = 0.1
-    with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            downloaded += len(chunk)
-            if asset["size"] and downloaded / asset["size"] >= next_report:
-                log(f"  ... {downloaded / asset['size'] * 100:.0f}%")
-                next_report += 0.1
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
+            while True:
+                check_cancel()
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if asset["size"] and downloaded / asset["size"] >= next_report:
+                    log(f"  ... {downloaded / asset['size'] * 100:.0f}%")
+                    next_report += 0.1
+    except FetchCancelled:
+        tmp.unlink(missing_ok=True)
+        raise
 
     shutil.move(str(tmp), str(dest))
     _meta_path(device).write_text(
