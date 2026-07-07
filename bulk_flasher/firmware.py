@@ -5,11 +5,14 @@ from __future__ import annotations
 import fnmatch
 import json
 import shutil
+import ssl
 import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+import certifi
 
 from .devices import Device
 
@@ -67,7 +70,8 @@ def get_cached(device: Device) -> FirmwareInfo | None:
 
 def _api_get(url: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -114,10 +118,11 @@ def fetch_latest(
     req = urllib.request.Request(
         asset["browser_download_url"], headers={"User-Agent": USER_AGENT}
     )
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
     downloaded = 0
     next_report = 0.1
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
+        with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp, open(tmp, "wb") as out:
             while True:
                 check_cancel()
                 chunk = resp.read(256 * 1024)

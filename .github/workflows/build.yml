@@ -57,6 +57,7 @@ jobs:
             --collect-data esptool \
             --copy-metadata esptool \
             --collect-submodules serial \
+            --collect-data certifi \
             --clean --noconfirm \
             run.py
 

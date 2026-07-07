@@ -5,6 +5,7 @@ description = "Bulk firmware flasher TUI for Fri3d Camp 2026 devices (Badge, Com
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "certifi",
     "textual>=1.0",
     "esptool>=5.0",
     "pyserial>=3.5",

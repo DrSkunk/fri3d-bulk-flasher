@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import ssl
 import stat
 import sys
 import tarfile
@@ -12,6 +13,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable
+
+import certifi
 
 from .devices import TOOLS_DIR
 
@@ -52,7 +55,8 @@ def download_wchisp(log: LogFn) -> Path:
     url = f"https://api.github.com/repos/{WCHISP_REPO}/releases/latest"
     log("Querying wchisp latest release...")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
         release = json.loads(resp.read().decode())
 
     suffix = _wchisp_asset_suffix()
@@ -70,7 +74,8 @@ def download_wchisp(log: LogFn) -> Path:
     req = urllib.request.Request(
         asset["browser_download_url"], headers={"User-Agent": USER_AGENT}
     )
-    with urllib.request.urlopen(req, timeout=60) as resp, open(archive, "wb") as out:
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(req, timeout=60, context=ssl_context) as resp, open(archive, "wb") as out:
         shutil.copyfileobj(resp, out)
 
     exe_name = _wchisp_exe_name()
