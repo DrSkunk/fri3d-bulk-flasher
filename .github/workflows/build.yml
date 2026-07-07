@@ -84,14 +84,13 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "${BIN_NAME}-${{ matrix.target }}.zip" "${BIN_NAME}.exe"
           else
-            tar czf "${BIN_NAME}-${{ matrix.target }}.tar.gz" "${BIN_NAME}"
+            7z a "${BIN_NAME}-${{ matrix.target }}.zip" "${BIN_NAME}"
           fi
 
       - uses: actions/upload-artifact@v7
         with:
           name: fri3d-bulk-flasher-${{ steps.vars.outputs.version }}-${{ matrix.target }}
           path: |
-            dist/*.tar.gz
             dist/*.zip
 
   release:
