@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-build = ["pyinstaller>=6.10"]
+build = ["pyinstaller>=6.10", "tomli>=2.0 ; python_version < '3.11'"]
 
 [project.scripts]
 fri3d-bulk-flasher = "bulk_flasher.app:main"
