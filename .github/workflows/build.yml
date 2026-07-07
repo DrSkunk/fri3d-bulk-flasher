@@ -31,13 +31,27 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read project version
+        id: vars
+        shell: bash
+        run: |
+          VERSION="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+          print(data['project']['version'])
+          PY
+          )"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Build binary
         shell: bash
         run: |
           uv sync --group build
+          BIN_NAME="fri3d-bulk-flasher-${{ steps.vars.outputs.version }}"
           uv run pyinstaller \
             --onefile \
-            --name fri3d-bulk-flasher \
+            --name "$BIN_NAME" \
             --collect-submodules textual \
             --collect-submodules esptool \
             --collect-data esptool \
@@ -49,10 +63,11 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
+          BIN_NAME="fri3d-bulk-flasher-${{ steps.vars.outputs.version }}"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            BIN=dist/fri3d-bulk-flasher.exe
+            BIN="dist/${BIN_NAME}.exe"
           else
-            BIN=dist/fri3d-bulk-flasher
+            BIN="dist/${BIN_NAME}"
           fi
           "$BIN" --version
           "$BIN" --esptool version
@@ -61,15 +76,16 @@ jobs:
         shell: bash
         run: |
           cd dist
+          BIN_NAME="fri3d-bulk-flasher-${{ steps.vars.outputs.version }}"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a fri3d-bulk-flasher-${{ matrix.target }}.zip fri3d-bulk-flasher.exe
+            7z a "${BIN_NAME}-${{ matrix.target }}.zip" "${BIN_NAME}.exe"
           else
-            tar czf fri3d-bulk-flasher-${{ matrix.target }}.tar.gz fri3d-bulk-flasher
+            tar czf "${BIN_NAME}-${{ matrix.target }}.tar.gz" "${BIN_NAME}"
           fi
 
       - uses: actions/upload-artifact@v7
         with:
-          name: fri3d-bulk-flasher-${{ matrix.target }}
+          name: fri3d-bulk-flasher-${{ steps.vars.outputs.version }}-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip

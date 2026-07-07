@@ -23,11 +23,11 @@ pushing a `v*` tag attaches them to a GitHub Release.
 Build one locally for your current platform:
 
 ```sh
-./build-binary.sh          # -> dist/fri3d-bulk-flasher
+./build-binary.sh          # -> dist/fri3d-bulk-flasher-<version>
 ```
 
 (Windows: run the `uv run pyinstaller ...` command from the script in
-PowerShell — output is `dist\fri3d-bulk-flasher.exe`.)
+PowerShell — output is `dist\\fri3d-bulk-flasher-<version>.exe`.)
 
 esptool is bundled inside the binary; wchisp is still downloaded on first use.
 
