@@ -53,6 +53,31 @@ Or straight from the source tree:
 uv run fri3d-bulk-flasher
 ```
 
+## Development
+
+Everything goes through [uv](https://docs.astral.sh/uv/) — it creates the
+virtualenv and installs dependencies automatically on first run:
+
+```sh
+uv run fri3d-bulk-flasher   # run the app; code edits apply on next run
+uv sync                     # (re)install deps after changing pyproject.toml
+```
+
+Debugging a Textual TUI (the app owns the terminal, so `print()` is useless):
+
+```sh
+uv run textual console               # in a second terminal
+uv run textual run --dev bulk_flasher.app:BulkFlasherApp
+```
+
+`textual run --dev` connects to the console for live log output and enables
+CSS hot-reloading (the `textual-dev` tools are in the `dev` dependency group,
+installed by `uv sync`/`uv run` automatically).
+
+There is no USB hardware in CI, so exercise flashing logic against fakes: the
+port poller and flash call (`_esp_candidate_ports`, `_flash_esptool_slot` in
+`bulk_flasher/flasher.py`) are module-level and easy to monkeypatch.
+
 ## Usage
 
 1. Pick a device with the arrow keys.
@@ -60,9 +85,28 @@ uv run fri3d-bulk-flasher
    `~/.fri3d-bulk-flasher/`). Starting without firmware fetches it automatically.
 3. Press `s` to start bulk flashing, then just keep plugging devices in:
    - **Badge**: plug in over USB → it flashes → unplug → plug in the next one.
+     Badges flash **in parallel**: every newly plugged-in badge claims a free
+     slot (up to 10 by default) and flashes immediately, so you can keep a
+     whole USB hub busy at once.
    - **Communicator / DJ Addon**: hold the BOOT button while plugging in USB
-     (enters the CH32 bootloader) → it flashes → unplug → next one.
-4. The sidebar tracks OK / failed / total counts. Press `s` again (or Stop) to end.
+     (enters the CH32 bootloader) → it flashes → unplug → next one (wchisp can
+     only talk to one bootloader device at a time, so these stay sequential).
+4. The status grid shows one card per slot — port, progress bar, and
+   success/failure — and adapts its columns to the terminal width. The sidebar
+   tracks OK / failed / total counts. Press `s` again (or Stop) to end.
+
+### Configuration
+
+Settings live in `~/.fri3d-bulk-flasher/config.toml` (created on first run):
+
+```toml
+# How many badges may be flashed at the same time (1-16).
+max_parallel = 10
+
+# Serial baud rate for badge flashing (default: device default, 921600).
+# Lower it (e.g. 460800 or 115200) if flashing is unreliable through a hub.
+#baud = 921600
+```
 
 `esptool` is installed as a Python dependency. `wchisp` is found on your `PATH`,
 or automatically downloaded from the [wchisp releases](https://github.com/ch32-rs/wchisp/releases)
@@ -84,5 +128,5 @@ on first use.
 - The badge is flashed with the full 16 MB image, so every flash produces an
   identical, factory-fresh device (no erase step needed). At 921600 baud a badge
   takes a few minutes.
-- The flasher waits for the device to be **unplugged** before arming for the
-  next one, so it never flashes the same unit twice.
+- The flasher keeps a port claimed until the device is **unplugged**, so it
+  never flashes the same unit twice — even with many badges connected at once.

@@ -1,7 +1,14 @@
-"""Flashing logic: device detection, esptool/wchisp invocation, bulk loop."""
+"""Flashing logic: device detection, esptool/wchisp invocation, bulk loops.
+
+Badges (esptool) flash in parallel: every newly plugged-in serial port claims
+a free slot and gets its own worker thread. CH32 devices (wchisp) flash one
+at a time because wchisp cannot address a specific unit.
+"""
 
 from __future__ import annotations
 
+import itertools
+import re
 import subprocess
 import sys
 import threading
@@ -26,6 +33,8 @@ POLL_INTERVAL = 0.5
 # brief re-enumeration blip when the device resets after flashing).
 REMOVAL_STABLE_POLLS = 5
 
+_PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+
 
 @dataclass
 class Stats:
@@ -33,6 +42,38 @@ class Stats:
     succeeded: int = 0
     failed: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+@dataclass
+class Slot:
+    """Status of one parallel flashing slot, shared with the UI thread."""
+
+    index: int
+    state: str = "waiting"  # waiting | flashing | success | failed
+    port: str = ""
+    progress: int = -1  # -1 = no progress bar
+    detail: str = ""
+    unit: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def update(self, **kwargs) -> None:
+        with self.lock:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "index": self.index,
+                "state": self.state,
+                "port": self.port,
+                "progress": self.progress,
+                "detail": self.detail,
+                "unit": self.unit,
+            }
+
+
+SlotFn = Callable[[Slot], None]
 
 
 def _esp_candidate_ports() -> set[str]:
@@ -123,29 +164,32 @@ def _run_quiet(cmd: list[str], timeout: float = 10) -> int:
         return -1
 
 
-# ---------------------------------------------------------------- esptool ---
+# ------------------------------------------------------- esptool (parallel) ---
 
 
-def _wait_for_esp_port(cancel: threading.Event, log: LogFn) -> str | None:
-    announced = False
-    while not cancel.is_set():
-        ports = sorted(_esp_candidate_ports())
-        if ports:
-            if len(ports) > 1:
-                log(f"Multiple candidate ports {ports}; using {ports[0]}")
-            return ports[0]
-        if not announced:
-            log("Waiting for a badge... plug one in.")
-            announced = True
-        time.sleep(POLL_INTERVAL)
-    return None
+class _PortWatcher:
+    """Latest set of candidate ports, polled once by the manager thread and
+    read by all slot workers (so 10 workers don't each enumerate USB)."""
+
+    def __init__(self) -> None:
+        self._ports: set[str] = set()
+        self._lock = threading.Lock()
+
+    def set_ports(self, ports: set[str]) -> None:
+        with self._lock:
+            self._ports = ports
+
+    def has(self, port: str) -> bool:
+        with self._lock:
+            return port in self._ports
 
 
-def _wait_for_port_removal(port: str, cancel: threading.Event, log: LogFn) -> None:
-    log("Unplug the device to continue.")
+def _wait_for_removal_watched(
+    port: str, watcher: _PortWatcher, cancel: threading.Event
+) -> None:
     absent = 0
     while not cancel.is_set():
-        if port in _esp_candidate_ports():
+        if watcher.has(port):
             absent = 0
         else:
             absent += 1
@@ -154,8 +198,15 @@ def _wait_for_port_removal(port: str, cancel: threading.Event, log: LogFn) -> No
         time.sleep(POLL_INTERVAL)
 
 
-def _flash_esptool(
-    device: Device, fw: Path, port: str, log: LogFn, cancel: threading.Event
+def _flash_esptool_slot(
+    device: Device,
+    fw: Path,
+    port: str,
+    slot: Slot,
+    on_slot_change: SlotFn,
+    log: LogFn,
+    cancel: threading.Event,
+    unit: int,
 ) -> bool:
     cmd = esptool_cmd() + [
         "--chip", device.chip,
@@ -163,12 +214,141 @@ def _flash_esptool(
         "--baud", str(device.baud),
         "write-flash", hex(device.flash_offset), str(fw),
     ]
-    log(f"Flashing {fw.name} to {port} at {device.baud} baud...")
-    rc = _run_streamed(cmd, log, cancel)
-    return rc == 0
+
+    def on_line(raw: str) -> None:
+        line = raw.strip()
+        match = _PROGRESS_RE.search(line)
+        if match:
+            slot.update(progress=min(100, int(float(match.group(1)))), detail=line)
+        else:
+            slot.update(detail=line)
+        on_slot_change(slot)
+        lowered = line.lower()
+        if "error" in lowered or "fatal" in lowered:
+            log(f"[#{unit}] {port}: {line}")
+
+    return _run_streamed(cmd, on_line, cancel) == 0
 
 
-# ----------------------------------------------------------------- wchisp ---
+def _slot_worker(
+    device: Device,
+    fw: Path,
+    port: str,
+    slot: Slot,
+    unit: int,
+    watcher: _PortWatcher,
+    cancel: threading.Event,
+    stats: Stats,
+    on_stats_change: Callable[[], None],
+    on_slot_change: SlotFn,
+    log: LogFn,
+    release: Callable[[str, Slot], None],
+) -> None:
+    try:
+        slot.update(
+            state="flashing", port=port, unit=unit, progress=0, detail="Preparing..."
+        )
+        on_slot_change(slot)
+        log(f"[#{unit}] {port}: flashing {fw.name}...")
+        # Give the OS a moment to finish setting up the port
+        if cancel.wait(1.0):
+            return
+        ok = _flash_esptool_slot(
+            device, fw, port, slot, on_slot_change, log, cancel, unit
+        )
+        if cancel.is_set():
+            return
+        with stats.lock:
+            stats.attempted += 1
+            if ok:
+                stats.succeeded += 1
+            else:
+                stats.failed += 1
+        on_stats_change()
+        if ok:
+            slot.update(state="success", progress=100, detail="Unplug to free slot")
+            log(f"[#{unit}] {port}: SUCCESS — unplug when ready.")
+        else:
+            slot.update(state="failed", progress=-1, detail="Unplug to free slot")
+            log(f"[#{unit}] {port}: FAILED — check the connection and try again.")
+        on_slot_change(slot)
+        _wait_for_removal_watched(port, watcher, cancel)
+    except Exception as exc:  # noqa: BLE001 — a dead slot must not kill the run
+        log(f"[#{unit}] {port}: ERROR: {exc}")
+    finally:
+        slot.update(state="waiting", port="", progress=-1, detail="", unit=0)
+        on_slot_change(slot)
+        release(port, slot)
+
+
+def parallel_flash_loop(
+    device: Device,
+    fw: Path,
+    cancel: threading.Event,
+    log: LogFn,
+    stats: Stats,
+    on_stats_change: Callable[[], None],
+    slots: list[Slot],
+    on_slot_change: SlotFn,
+) -> None:
+    """Flash every newly plugged-in badge, up to len(slots) at once.
+
+    Runs in a worker thread. Each claimed port keeps its slot until the
+    device is unplugged, so a unit is never flashed twice.
+    """
+    log(
+        f"=== Bulk flashing {device.name} — up to {len(slots)} at once, "
+        "press Stop to end ==="
+    )
+    if device.instructions:
+        log(device.instructions)
+
+    watcher = _PortWatcher()
+    claim_lock = threading.Lock()
+    claimed: dict[str, Slot] = {}
+    available = list(slots)
+    threads: list[threading.Thread] = []
+    unit_counter = itertools.count(1)
+
+    def release(port: str, slot: Slot) -> None:
+        with claim_lock:
+            claimed.pop(port, None)
+            available.append(slot)
+
+    while not cancel.is_set():
+        ports = _esp_candidate_ports()
+        watcher.set_ports(ports)
+        with claim_lock:
+            new_ports = sorted(ports - claimed.keys())
+            for port in new_ports:
+                if not available:
+                    break
+                slot = available.pop(0)
+                claimed[port] = slot
+                thread = threading.Thread(
+                    target=_slot_worker,
+                    args=(
+                        device, fw, port, slot, next(unit_counter), watcher,
+                        cancel, stats, on_stats_change, on_slot_change, log,
+                        release,
+                    ),
+                    daemon=True,
+                )
+                threads.append(thread)
+                thread.start()
+        time.sleep(POLL_INTERVAL)
+
+    for thread in threads:
+        thread.join(timeout=10)
+
+    log("")
+    log(
+        f"=== Stopped. {stats.succeeded} flashed OK, "
+        f"{stats.failed} failed, {stats.attempted} total. ==="
+    )
+
+
+# --------------------------------------------------------- wchisp (serial) ---
 
 
 def _wait_for_wch_device(
@@ -206,21 +386,18 @@ def _flash_wchisp(
     return rc == 0
 
 
-# -------------------------------------------------------------- bulk loop ---
-
-
-def bulk_flash_loop(
+def wchisp_flash_loop(
     device: Device,
     fw: Path,
     cancel: threading.Event,
     log: LogFn,
     stats: Stats,
     on_stats_change: Callable[[], None],
+    slot: Slot,
+    on_slot_change: SlotFn,
 ) -> None:
-    """Repeatedly flash devices until cancelled. Runs in a worker thread."""
-    wchisp: Path | None = None
-    if device.method == "wchisp":
-        wchisp = ensure_wchisp(log)
+    """Repeatedly flash CH32 devices one at a time until cancelled."""
+    wchisp = ensure_wchisp(log)
 
     log(f"=== Bulk flashing {device.name} — press Stop to end ===")
     if device.instructions:
@@ -231,19 +408,18 @@ def bulk_flash_loop(
         unit += 1
         log("")
         log(f"--- Device #{unit} ---")
+        slot.update(
+            state="waiting", port="", progress=-1, unit=unit,
+            detail=device.instructions,
+        )
+        on_slot_change(slot)
 
-        if device.method == "esptool":
-            port = _wait_for_esp_port(cancel, log)
-            if port is None:
-                break
-            # Give the OS a moment to finish setting up the port
-            time.sleep(1.0)
-            ok = _flash_esptool(device, fw, port, log, cancel)
-        else:
-            assert wchisp is not None
-            if not _wait_for_wch_device(wchisp, cancel, log, device.instructions):
-                break
-            ok = _flash_wchisp(wchisp, fw, log, cancel)
+        if not _wait_for_wch_device(wchisp, cancel, log, device.instructions):
+            break
+        slot.update(state="flashing", port="USB bootloader", progress=0,
+                    detail="Flashing...")
+        on_slot_change(slot)
+        ok = _flash_wchisp(wchisp, fw, log, cancel)
 
         if cancel.is_set():
             break
@@ -257,16 +433,17 @@ def bulk_flash_loop(
         on_stats_change()
 
         if ok:
+            slot.update(state="success", progress=100, detail="Unplug to continue")
             log(f"SUCCESS — device #{unit} flashed.")
         else:
+            slot.update(state="failed", progress=-1, detail="Unplug to continue")
             log(f"FAILED — device #{unit}. Check the connection and try again.")
+        on_slot_change(slot)
 
-        if device.method == "esptool":
-            _wait_for_port_removal(port, cancel, log)  # type: ignore[arg-type]
-        else:
-            assert wchisp is not None
-            _wait_for_wch_removal(wchisp, cancel, log)
+        _wait_for_wch_removal(wchisp, cancel, log)
 
+    slot.update(state="waiting", port="", progress=-1, detail="", unit=0)
+    on_slot_change(slot)
     log("")
     log(
         f"=== Stopped. {stats.succeeded} flashed OK, "

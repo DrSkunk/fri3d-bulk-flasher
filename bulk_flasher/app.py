@@ -2,17 +2,59 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import threading
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Footer, Header, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
 from . import firmware
+from .config import CONFIG_PATH, Config, load_config
 from .devices import DEVICES, Device, device_by_id
-from .flasher import Stats, bulk_flash_loop
+from .flasher import Slot, Stats, parallel_flash_loop, wchisp_flash_loop
+
+# Minimum card width (incl. border/gutter) used to pick the slot grid columns.
+SLOT_CARD_WIDTH = 34
+PROGRESS_BAR_WIDTH = 24
+
+
+class SlotWidget(Static):
+    """One flashing-slot card in the status grid."""
+
+    def __init__(self, index: int) -> None:
+        super().__init__(classes="slot slot-waiting")
+        self.index = index
+        self.show_waiting()
+
+    def show_waiting(self) -> None:
+        self.set_classes("slot slot-waiting")
+        self.update(
+            f"[dim]Slot {self.index + 1}[/dim]\n"
+            "[dim]— waiting for device —[/dim]"
+        )
+
+    def show(self, snap: dict) -> None:
+        state = snap["state"]
+        if state == "waiting":
+            self.show_waiting()
+            return
+        self.set_classes(f"slot slot-{state}")
+        port = snap["port"].removeprefix("/dev/")
+        title = f"[b]#{snap['unit']} {escape(port)}[/b]"
+        detail = escape(snap["detail"][:60])
+        if state == "flashing":
+            progress = max(0, snap["progress"])
+            filled = progress * PROGRESS_BAR_WIDTH // 100
+            bar = "█" * filled + "─" * (PROGRESS_BAR_WIDTH - filled)
+            self.update(f"{title}\n{bar} {progress:3d}%\n[dim]{detail}[/dim]")
+        elif state == "success":
+            self.update(f"{title}\n[green]✔ Flashed OK[/green]\n[dim]{detail}[/dim]")
+        else:  # failed
+            self.update(f"{title}\n[red]✖ FAILED[/red]\n[dim]{detail}[/dim]")
 
 
 class BulkFlasherApp(App):
@@ -38,6 +80,10 @@ class BulkFlasherApp(App):
         color: $text-muted;
         min-height: 3;
     }
+    #parallel-info {
+        margin-bottom: 1;
+        color: $text-muted;
+    }
     #stats {
         margin-top: 1;
         text-style: bold;
@@ -46,8 +92,28 @@ class BulkFlasherApp(App):
         width: 100%;
         margin-bottom: 1;
     }
+    #slots {
+        height: auto;
+        grid-gutter: 0 1;
+        padding: 0 1;
+    }
+    .slot {
+        height: 5;
+        padding: 0 1;
+        border: round $panel-lighten-2;
+    }
+    .slot-flashing {
+        border: round $warning;
+    }
+    .slot-success {
+        border: round $success;
+    }
+    .slot-failed {
+        border: round $error;
+    }
     #log {
         padding: 0 1;
+        min-height: 5;
     }
     """
 
@@ -59,11 +125,14 @@ class BulkFlasherApp(App):
 
     def __init__(self) -> None:
         super().__init__()
+        self.config_data: Config = load_config()
         self.selected_device: Device = DEVICES[0]
         self.cancel_event: threading.Event | None = None
         self.fetch_cancel: threading.Event | None = None
         self.stats = Stats()
         self.busy = False  # a fetch or flash worker is running
+        self.slots: list[Slot] = []
+        self.slot_widgets: list[SlotWidget] = []
 
     # ------------------------------------------------------------- layout --
 
@@ -77,18 +146,26 @@ class BulkFlasherApp(App):
                 )
                 yield Static("Firmware", classes="section-title")
                 yield Static("", id="fw-info")
+                yield Static("", id="parallel-info")
                 yield Button("Fetch latest firmware [f]", id="fetch")
                 yield Button("Start bulk flashing [s]", id="start", variant="success")
                 yield Button("Stop [s]", id="stop", variant="error", disabled=True)
                 yield Static("", id="stats")
-            yield RichLog(id="log", wrap=True, markup=False, highlight=False)
+            with Vertical(id="main"):
+                yield Grid(id="slots")
+                yield RichLog(id="log", wrap=True, markup=False, highlight=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#devices", OptionList).highlighted = 0
         self._refresh_fw_info()
+        self._refresh_parallel_info()
         self._refresh_stats()
+        self._rebuild_slot_widgets(self._slot_count(self.selected_device))
         self.log_line("Select a device, fetch firmware, then start bulk flashing.")
+
+    def on_resize(self, event) -> None:
+        self._layout_slots()
 
     # ------------------------------------------------------------ helpers --
 
@@ -105,6 +182,10 @@ class BulkFlasherApp(App):
     def _log_from_thread(self, line: str) -> None:
         self._call_ui(self.log_line, line)
 
+    def _slot_count(self, device: Device) -> int:
+        # wchisp can only talk to one bootloader device at a time.
+        return self.config_data.max_parallel if device.method == "esptool" else 1
+
     def _refresh_fw_info(self) -> None:
         info = firmware.get_cached(self.selected_device)
         widget = self.query_one("#fw-info", Static)
@@ -113,6 +194,18 @@ class BulkFlasherApp(App):
             widget.update(f"{info.tag}\n{info.asset_name} ({size})")
         else:
             widget.update("Not downloaded yet.\nPress [f] to fetch.")
+
+    def _refresh_parallel_info(self) -> None:
+        widget = self.query_one("#parallel-info", Static)
+        if self.selected_device.method == "esptool":
+            baud = self.config_data.baud or self.selected_device.baud
+            widget.update(
+                f"Parallel: up to {self.config_data.max_parallel} at once\n"
+                f"Baud: {baud}\n"
+                f"(configure in {CONFIG_PATH})"
+            )
+        else:
+            widget.update("Sequential: one device at a time\n(wchisp limitation)")
 
     def _refresh_stats(self) -> None:
         with self.stats.lock:
@@ -129,6 +222,31 @@ class BulkFlasherApp(App):
         self.query_one("#stop", Button).disabled = not flashing
         self.query_one("#devices", OptionList).disabled = flashing
 
+    # --------------------------------------------------------- slot grid --
+
+    def _rebuild_slot_widgets(self, count: int) -> None:
+        grid = self.query_one("#slots", Grid)
+        grid.remove_children()
+        self.slot_widgets = [SlotWidget(i) for i in range(count)]
+        grid.mount(*self.slot_widgets)
+        self._layout_slots()
+
+    def _layout_slots(self) -> None:
+        grid = self.query_one("#slots", Grid)
+        count = len(self.slot_widgets)
+        if not count:
+            return
+        width = grid.size.width or grid.container_size.width
+        columns = max(1, min(count, width // SLOT_CARD_WIDTH)) if width else 1
+        grid.styles.grid_size_columns = columns
+
+    def _update_slot(self, slot: Slot) -> None:
+        if slot.index < len(self.slot_widgets):
+            self.slot_widgets[slot.index].show(slot.snapshot())
+
+    def _slot_changed_from_thread(self, slot: Slot) -> None:
+        self._call_ui(self._update_slot, slot)
+
     # ------------------------------------------------------------- events --
 
     def on_option_list_option_highlighted(
@@ -137,6 +255,8 @@ class BulkFlasherApp(App):
         if event.option_id and not self.busy:
             self.selected_device = device_by_id(event.option_id)
             self._refresh_fw_info()
+            self._refresh_parallel_info()
+            self._rebuild_slot_widgets(self._slot_count(self.selected_device))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "fetch":
@@ -217,15 +337,20 @@ class BulkFlasherApp(App):
         self._call_ui(self._launch_flash_loop, device, info)
 
     def _launch_flash_loop(self, device: Device, info: firmware.FirmwareInfo) -> None:
+        if device.method == "esptool" and self.config_data.baud:
+            device = dataclasses.replace(device, baud=self.config_data.baud)
         self.busy = True
         self.cancel_event = threading.Event()
         self.stats = Stats()
         self._refresh_stats()
         self._set_flashing_ui(True)
+        self.slots = [Slot(i) for i in range(self._slot_count(device))]
+        self._rebuild_slot_widgets(len(self.slots))
         cancel = self.cancel_event
         stats = self.stats
+        slots = self.slots
         self.run_worker(
-            lambda: self._flash_worker(device, info, cancel, stats),
+            lambda: self._flash_worker(device, info, cancel, stats, slots),
             thread=True,
             exclusive=False,
         )
@@ -236,16 +361,31 @@ class BulkFlasherApp(App):
         info: firmware.FirmwareInfo,
         cancel: threading.Event,
         stats: Stats,
+        slots: list[Slot],
     ) -> None:
         try:
-            bulk_flash_loop(
-                device,
-                info.path,
-                cancel,
-                self._log_from_thread,
-                stats,
-                lambda: self._call_ui(self._refresh_stats),
-            )
+            if device.method == "esptool":
+                parallel_flash_loop(
+                    device,
+                    info.path,
+                    cancel,
+                    self._log_from_thread,
+                    stats,
+                    lambda: self._call_ui(self._refresh_stats),
+                    slots,
+                    self._slot_changed_from_thread,
+                )
+            else:
+                wchisp_flash_loop(
+                    device,
+                    info.path,
+                    cancel,
+                    self._log_from_thread,
+                    stats,
+                    lambda: self._call_ui(self._refresh_stats),
+                    slots[0],
+                    self._slot_changed_from_thread,
+                )
         except Exception as exc:  # noqa: BLE001
             self._log_from_thread(f"ERROR: {exc}")
         finally:
