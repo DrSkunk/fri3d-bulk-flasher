@@ -9,11 +9,30 @@ import threading
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
-from textual.widgets import Button, Footer, Header, OptionList, RichLog, Static
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    OptionList,
+    RichLog,
+    Static,
+)
 from textual.widgets.option_list import Option
 
 from . import firmware
-from .config import CONFIG_PATH, Config, load_config
+from .config import (
+    BAUD_MAX,
+    BAUD_MIN,
+    CONFIG_PATH,
+    MAX_PARALLEL_LIMIT,
+    Config,
+    load_config,
+    make_config,
+    save_config,
+)
 from .devices import DEVICES, Device, device_by_id
 from .flasher import Slot, Stats, parallel_flash_loop, wchisp_flash_loop
 
@@ -55,6 +74,72 @@ class SlotWidget(Static):
             self.update(f"{title}\n[green]✔ Flashed OK[/green]\n[dim]{detail}[/dim]")
         else:  # failed
             self.update(f"{title}\n[red]✖ FAILED[/red]\n[dim]{detail}[/dim]")
+
+
+class SettingsScreen(ModalScreen["Config | None"]):
+    """Modal editor for config.toml values. Dismisses with the new Config,
+    or None on cancel."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._config = config
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-dialog"):
+            yield Static("Settings", id="settings-title")
+            yield Label(f"Parallel slots (1-{MAX_PARALLEL_LIMIT}, badge only)")
+            yield Input(
+                value=str(self._config.max_parallel),
+                type="integer",
+                id="set-parallel",
+            )
+            yield Label(
+                f"Baud rate ({BAUD_MIN}-{BAUD_MAX}, "
+                "empty = device default)"
+            )
+            yield Input(
+                value="" if self._config.baud is None else str(self._config.baud),
+                type="integer",
+                placeholder="921600",
+                id="set-baud",
+            )
+            yield Static("", id="settings-error")
+            with Horizontal(id="settings-buttons"):
+                yield Button("Save", id="settings-save", variant="success")
+                yield Button("Cancel", id="settings-cancel")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-save":
+            self._save()
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        parallel_raw = self.query_one("#set-parallel", Input).value.strip()
+        baud_raw = self.query_one("#set-baud", Input).value.strip()
+        error = self.query_one("#settings-error", Static)
+        try:
+            max_parallel = int(parallel_raw)
+        except ValueError:
+            error.update("Parallel slots must be a number.")
+            return
+        baud: int | None = None
+        if baud_raw:
+            try:
+                baud = int(baud_raw)
+            except ValueError:
+                error.update("Baud rate must be a number (or empty).")
+                return
+        # make_config clamps out-of-range values instead of rejecting them
+        self.dismiss(make_config(max_parallel, baud))
 
 
 class BulkFlasherApp(App):
@@ -115,11 +200,41 @@ class BulkFlasherApp(App):
         padding: 0 1;
         min-height: 5;
     }
+    SettingsScreen {
+        align: center middle;
+    }
+    #settings-dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        border: thick $primary;
+        background: $surface;
+    }
+    #settings-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    #settings-dialog Input {
+        margin-bottom: 1;
+    }
+    #settings-error {
+        color: $error;
+        min-height: 1;
+    }
+    #settings-buttons {
+        height: auto;
+    }
+    #settings-buttons Button {
+        width: 1fr;
+        margin: 0 1 0 0;
+    }
     """
 
     BINDINGS = [
         ("f", "fetch", "Fetch firmware"),
         ("s", "start_stop", "Start/Stop"),
+        ("c", "settings", "Settings"),
         ("q", "quit", "Quit"),
     ]
 
@@ -202,7 +317,7 @@ class BulkFlasherApp(App):
             widget.update(
                 f"Parallel: up to {self.config_data.max_parallel} at once\n"
                 f"Baud: {baud}\n"
-                f"(configure in {CONFIG_PATH})"
+                "(press [b]c[/b] to change)"
             )
         else:
             widget.update("Sequential: one device at a time\n(wchisp limitation)")
@@ -267,6 +382,24 @@ class BulkFlasherApp(App):
             self._stop_flashing()
 
     # ------------------------------------------------------------ actions --
+
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen(self.config_data), self._settings_closed)
+
+    def _settings_closed(self, result: Config | None) -> None:
+        if result is None or result == self.config_data:
+            return
+        self.config_data = result
+        try:
+            save_config(result)
+            self.log_line(f"Settings saved to {CONFIG_PATH}.")
+        except OSError as exc:
+            self.log_line(f"ERROR saving settings: {exc} — applied for this session only.")
+        self._refresh_parallel_info()
+        if self.busy:
+            self.log_line("New settings apply to the next flashing run.")
+        else:
+            self._rebuild_slot_widgets(self._slot_count(self.selected_device))
 
     def action_fetch(self) -> None:
         if self.busy:

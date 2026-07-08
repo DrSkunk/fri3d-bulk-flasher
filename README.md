@@ -97,7 +97,12 @@ port poller and flash call (`_esp_candidate_ports`, `_flash_esptool_slot` in
 
 ### Configuration
 
-Settings live in `~/.fri3d-bulk-flasher/config.toml` (created on first run):
+Press `c` in the app to open the Settings screen and change the parallel
+slot count and baud rate — changes are saved to the config file and take
+effect immediately (or on the next run if flashing is in progress).
+
+The same settings live in `~/.fri3d-bulk-flasher/config.toml` (created on
+first run) and can be edited by hand:
 
 ```toml
 # How many badges may be flashed at the same time (1-16).

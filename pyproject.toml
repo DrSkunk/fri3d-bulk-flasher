@@ -1,6 +1,6 @@
 [project]
 name = "fri3d-bulk-flasher"
-version = "0.1.4"
+version = "0.1.5"
 description = "Bulk firmware flasher TUI for Fri3d Camp 2026 devices (Badge, Communicator, DJ Addon)"
 readme = "README.md"
 requires-python = ">=3.10"

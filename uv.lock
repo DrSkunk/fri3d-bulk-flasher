@@ -519,7 +519,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/76/ac/d2016cf6b3709d0e0
 
 [[package]]
 name = "fri3d-bulk-flasher"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

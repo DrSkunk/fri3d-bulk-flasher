@@ -17,25 +17,47 @@ MAX_PARALLEL_LIMIT = 16
 BAUD_MIN = 9600
 BAUD_MAX = 3_000_000
 
-_DEFAULT_TOML = f"""\
-# Fri3d bulk flasher configuration.
-
-# How many badges may be flashed at the same time (1-{MAX_PARALLEL_LIMIT}).
-# Only applies to esptool devices (the badge); the CH32 devices are always
-# flashed one at a time because wchisp cannot target a specific unit.
-max_parallel = {DEFAULT_MAX_PARALLEL}
-
-# Serial baud rate for badge flashing. Uncomment to override the device
-# default (921600). Lower it (e.g. 460800 or 115200) if flashing is
-# unreliable through a hub, or raise it if your adapters can take it.
-#baud = 921600
-"""
-
 
 @dataclass(frozen=True)
 class Config:
     max_parallel: int = DEFAULT_MAX_PARALLEL
     baud: int | None = None  # None = use the device's default
+
+
+def make_config(max_parallel: int, baud: int | None) -> Config:
+    """Build a Config with values clamped to their valid ranges."""
+    if baud is not None:
+        baud = max(BAUD_MIN, min(BAUD_MAX, baud))
+    return Config(
+        max_parallel=max(1, min(MAX_PARALLEL_LIMIT, max_parallel)),
+        baud=baud,
+    )
+
+
+def _render_toml(config: Config) -> str:
+    baud_line = (
+        f"baud = {config.baud}" if config.baud is not None else "#baud = 921600"
+    )
+    return f"""\
+# Fri3d bulk flasher configuration.
+# Edited in-app via the Settings screen [c], or by hand.
+
+# How many badges may be flashed at the same time (1-{MAX_PARALLEL_LIMIT}).
+# Only applies to esptool devices (the badge); the CH32 devices are always
+# flashed one at a time because wchisp cannot target a specific unit.
+max_parallel = {config.max_parallel}
+
+# Serial baud rate for badge flashing. Uncomment to override the device
+# default (921600). Lower it (e.g. 460800 or 115200) if flashing is
+# unreliable through a hub, or raise it if your adapters can take it.
+{baud_line}
+"""
+
+
+def save_config(config: Config) -> None:
+    """Write config.toml. Raises OSError if the file can't be written."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(_render_toml(config))
 
 
 def load_config() -> Config:
@@ -46,8 +68,7 @@ def load_config() -> Config:
     """
     if not CONFIG_PATH.exists():
         try:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_PATH.write_text(_DEFAULT_TOML)
+            save_config(Config())
         except OSError:
             pass
         return Config()
@@ -58,9 +79,4 @@ def load_config() -> Config:
         baud = None if baud is None else int(baud)
     except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
         return Config()
-    if baud is not None:
-        baud = max(BAUD_MIN, min(BAUD_MAX, baud))
-    return Config(
-        max_parallel=max(1, min(MAX_PARALLEL_LIMIT, max_parallel)),
-        baud=baud,
-    )
+    return make_config(max_parallel, baud)

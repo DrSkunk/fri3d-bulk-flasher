@@ -1,3 +1,3 @@
 """Bulk firmware flasher for Fri3d Camp 2026 devices."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
