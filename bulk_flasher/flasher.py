@@ -44,7 +44,7 @@ class Stats:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
-@dataclass
+@dataclass(eq=False)  # identity semantics: slots are compared by object, not value
 class Slot:
     """Status of one parallel flashing slot, shared with the UI thread."""
 
@@ -76,9 +76,15 @@ class Slot:
 SlotFn = Callable[[Slot], None]
 
 
-def _esp_candidate_ports() -> set[str]:
+def _esp_candidate_ports() -> dict[str, str | None]:
+    """Candidate serial ports mapped to their USB location.
+
+    The location is the physical bus/hub-port path (e.g. "20-1.4"), stable
+    across replugs for the same physical port; None if the driver doesn't
+    report one.
+    """
     return {
-        p.device
+        p.device: getattr(p, "location", None)
         for p in list_ports.comports()
         if p.vid in ESP_VIDS
     }
@@ -281,6 +287,37 @@ def _slot_worker(
         release(port, slot)
 
 
+def _pick_slot(
+    location: str | None,
+    available: list[Slot],
+    location_slots: dict[str, Slot],
+) -> Slot | None:
+    """Choose a slot for a newly seen port; None means try again next poll.
+
+    A USB location sticks to the slot it got first, so the same physical
+    hub port always shows up in the same grid card for the whole session.
+    """
+    if location:
+        slot = location_slots.get(location)
+        if slot is not None:
+            # Sticky slot exists; if it is still busy (e.g. the previous
+            # device's removal hasn't settled), wait rather than steal
+            # another location's slot.
+            return slot if slot in available else None
+        bound = set(map(id, location_slots.values()))
+        unbound = [s for s in available if id(s) not in bound]
+        if unbound:
+            slot = min(unbound, key=lambda s: s.index)
+            location_slots[location] = slot
+            return slot
+        # More physical ports than slots: overflow floats on any free slot.
+        return min(available, key=lambda s: s.index)
+    # No location info from the driver: float, preferring unbound slots.
+    bound = set(map(id, location_slots.values()))
+    pool = [s for s in available if id(s) not in bound] or available
+    return min(pool, key=lambda s: s.index)
+
+
 def parallel_flash_loop(
     device: Device,
     fw: Path,
@@ -294,7 +331,9 @@ def parallel_flash_loop(
     """Flash every newly plugged-in badge, up to len(slots) at once.
 
     Runs in a worker thread. Each claimed port keeps its slot until the
-    device is unplugged, so a unit is never flashed twice.
+    device is unplugged, so a unit is never flashed twice. Slots are sticky
+    per USB location for the session: the same physical hub port reuses the
+    same grid card.
     """
     log(
         f"=== Bulk flashing {device.name} — up to {len(slots)} at once, "
@@ -307,6 +346,7 @@ def parallel_flash_loop(
     claim_lock = threading.Lock()
     claimed: dict[str, Slot] = {}
     available = list(slots)
+    location_slots: dict[str, Slot] = {}
     threads: list[threading.Thread] = []
     unit_counter = itertools.count(1)
 
@@ -316,14 +356,19 @@ def parallel_flash_loop(
             available.append(slot)
 
     while not cancel.is_set():
-        ports = _esp_candidate_ports()
-        watcher.set_ports(ports)
+        port_locations = _esp_candidate_ports()
+        watcher.set_ports(set(port_locations))
         with claim_lock:
-            new_ports = sorted(ports - claimed.keys())
+            new_ports = sorted(port_locations.keys() - claimed.keys())
             for port in new_ports:
                 if not available:
                     break
-                slot = available.pop(0)
+                slot = _pick_slot(
+                    port_locations[port], available, location_slots
+                )
+                if slot is None:
+                    continue
+                available.remove(slot)
                 claimed[port] = slot
                 thread = threading.Thread(
                     target=_slot_worker,

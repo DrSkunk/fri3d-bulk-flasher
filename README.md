@@ -135,3 +135,8 @@ on first use.
   takes a few minutes.
 - The flasher keeps a port claimed until the device is **unplugged**, so it
   never flashes the same unit twice — even with many badges connected at once.
+- Slots are **sticky per physical USB port** for the session: the first time a
+  hub port is used it claims a grid card, and every badge plugged into that
+  same port lands on the same card afterwards (based on the USB location path,
+  independent of plug order). Ports whose driver reports no location fall back
+  to first-free assignment.
