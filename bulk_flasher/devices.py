@@ -20,7 +20,7 @@ class Device:
     method: str  # "esptool" or "wchisp"
     chip: str
     flash_offset: int = 0
-    baud: int = 921600
+    baud: int = 2_000_000
     instructions: str = ""
 
     @property
